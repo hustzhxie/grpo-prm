@@ -416,7 +416,11 @@ class PolicyModelActor(BaseModelActor):
             use_liger_kernel=strategy.args.use_liger_kernel,
         )
         strategy.print(actor)
-
+        print('草草草草草哦啊车哦啊哦次哦啊车哦啊哦次哦啊车哦啊哦' \
+        '次哦啊车哦啊哦草哦啊哦次哦啊哦从哦啊放哪' \
+        '惆怅长岑长擦擦擦擦擦擦擦擦擦擦擦擦擦擦擦擦擦擦擦擦擦' \
+        '惆怅长岑长擦擦擦擦擦擦擦擦擦擦擦擦擦擦擦擦擦擦擦擦擦擦擦擦擦擦擦擦擦擦擦擦擦' \
+        '吾问无为谓哇哇哇哇哇哇哇哇哇哇哇哇哇哇哇哇哇哇哇哇哇')
         # configure tokenizer
         self.tokenizer = get_tokenizer(
             pretrain, actor.model, "left", strategy, use_fast=not strategy.args.disable_fast_tokenizer
@@ -449,7 +453,7 @@ class PolicyModelActor(BaseModelActor):
 
         if args.gradient_checkpointing:
             actor.gradient_checkpointing_enable(
-                gradient_checkpointing_kwargs={"use_reentrant": args.gradient_checkpointing_use_reentrant}
+                gradient_checkpointing_kwargs={"use_reentrant": False}
             )
 
         # prepare models/optimizers...
@@ -566,3 +570,4 @@ class PolicyModelActor(BaseModelActor):
             )
         # wait
         torch_dist_barrier_and_cuda_sync()
+

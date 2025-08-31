@@ -29,3 +29,4 @@ def reward_func(queries, prompts, labels, **kwargs):
         "scores": reward,  # Scores for dynamic filtering (0-1 reward)
         "extra_logs": {"dummy_scores": reward},  # Additional logging info for wandb
     }
+

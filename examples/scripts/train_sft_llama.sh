@@ -1,20 +1,21 @@
+# 基础的sft训练脚本
 set -x
 
 read -r -d '' training_commands <<EOF
 openrlhf.cli.train_sft \
    --max_len 2048 \
-   --dataset Open-Orca/OpenOrca \
-   --input_key question \
+   --dataset meta-math/MetaMathQA \
+   --input_key query \
    --output_key response \
-   --train_batch_size 256 \
-   --micro_train_batch_size 2 \
+   --train_batch_size 16 \
+   --micro_train_batch_size 4 \
    --max_samples 500000 \
-   --pretrain meta-llama/Meta-Llama-3-8B \
-   --save_path ./checkpoint/llama3-8b-sft \
+   --pretrain /home/yanzhe/OpenRLHF/checkpoint/SFT/Qwen2.5-3B-base-mathmix3epo \
+   --save_path ./checkpoint/SFT/Qwen2.5-3B-base-mathmix3epo-metamath \
    --save_steps -1 \
    --logging_steps 1 \
    --eval_steps -1 \
-   --zero_stage 2 \
+   --zero_stage 3 \
    --max_epochs 1 \
    --bf16 \
    --flash_attn \

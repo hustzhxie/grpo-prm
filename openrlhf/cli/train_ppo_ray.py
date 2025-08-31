@@ -1,3 +1,20 @@
+"""
+基于 Ray 的 PPO/GRPO 训练入口（混合引擎版本）。
+
+核心职责：
+- 初始化 Ray 与分布式训练策略（strategy），按需创建 vLLM 引擎、Actor/Ref/Reward/Critic 各角色；
+- 支持同节点（node）下的角色共置（colocate），通过 placement group 打包资源，控制显卡分配策略；
+- 统一封装到 `PPOTrainer`（单控制器）中执行训练流程，包括生成、评估、优化与保存。
+
+重要提示：
+- `--colocate_*` 选项仅表示多个角色共置到同一个“节点（node）”，并结合 placement group 实现资源打包；
+  并不等价于“同一张 GPU 同时共享”。默认每个 Ray Actor 以整数 GPU 资源为单位申请；
+  当启用 placement group 时，本文件部分角色会使用 `num_gpus_per_actor=0.2`（Ray 的分数 GPU），
+  其含义是资源声明层面的配额，具体是否能够稳定同卡并发，还受显存与内核调度影响。
+- 使用 `--colocate_all_models` 时，vLLM 引擎与 DeepSpeed 模型会被安排在同一组 placement group 内，需确保
+  `actor_num_nodes * actor_num_gpus_per_node == vllm_num_engines * vllm_tensor_parallel_size`。
+"""
+
 import argparse
 from datetime import datetime
 
@@ -16,8 +33,18 @@ from openrlhf.utils import get_strategy
 
 
 def train(args):
+    """
+    训练主流程：
+    - 初始化 Ray 与策略（strategy）。
+    - 按共置策略创建 placement group（PG），从而将多个 Ray Actor 打包到同一节点资源池。
+    - 可选创建 vLLM 引擎（文本生成），并与 Actor 共置（当启用 `--colocate_all_models` 且非 async 模式）。
+    - 构建 Policy/Ref/Reward/Critic 的 RayActorGroup，并根据 PG 设置 `num_gpus_per_actor`（分数 GPU）。
+    - 创建 `PPOTrainer`（远程 Actor，单控制器），将上述模块与生成参数注入。
+    - 异步初始化各模型权重（from_pretrained），随后远程执行 fit()、并在结束后进行保存。
+    """
     # initialize ray if not initialized
     if not ray.is_initialized():
+        # 通过 runtime_env 传入环境变量，例如控制 Tokenizers 并行与 NCCL 日志等级
         ray.init(runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN"}})
 
     # configure strategy
@@ -25,7 +52,7 @@ def train(args):
     strategy.print(args)
 
     # init vllm / actor /critic /ref /reward model
-    # if colocated, create placement group for actor and ref model explicitly.
+    # 如果启用共置（colocate），优先为 Actor 与 Ref 创建 placement group（PG），将角色绑定在同一节点并按需打包资源。
     pg = None
     if args.colocate_actor_ref or args.colocate_all_models:
         if args.init_kl_coef > 0:
@@ -33,14 +60,16 @@ def train(args):
                 args.actor_num_nodes == args.ref_num_nodes
                 and args.actor_num_gpus_per_node == args.ref_num_gpus_per_node
             ), f"num_nodes and num_gpus_per_node must be the same when colocate actor and ref model."
-
+        # bundles 定义资源切片（每个切片 1GPU+1CPU），PACK 策略尽量将切片打包到最少节点上，
+        # 便于把 Actor/Ref 放到同一物理机，提高带宽与数据交换效率。
         bundles = [{"GPU": 1, "CPU": 1} for _ in range(args.actor_num_nodes * args.actor_num_gpus_per_node)]
-        pg = placement_group(bundles, strategy="PACK")
+        pg = placement_group(bundles, strategy="PACK") 
         ray.get(pg.ready())
 
     # init vLLM engine for text generation
     vllm_engines = None
     if args.vllm_num_engines is not None and args.vllm_num_engines > 0:
+        # vLLM 的最大上下文长度设置：优先使用 max_len，否则使用 prompt_max_len + generate_max_len 之和
         max_len = args.max_len if args.max_len else args.prompt_max_len + args.generate_max_len
         if args.colocate_all_models and not args.async_train:
             assert (
@@ -61,11 +90,12 @@ def train(args):
             args.vllm_num_engines,
             args.vllm_tensor_parallel_size,
             args.pretrain,
-            args.seed,
+            args.seed, 
             args.full_determinism,
             args.enable_prefix_caching,
             args.enforce_eager,
             max_len,
+            # 当启用 colocate_all_models 且为同步训练时，将 vLLM 也放到同一个 PG。否则 PG 传 None 独立调度。
             pg if args.colocate_all_models and not args.async_train else None,
             args.vllm_gpu_memory_utilization,
             args.vllm_enable_sleep,
@@ -79,11 +109,13 @@ def train(args):
         args.actor_num_gpus_per_node,
         PolicyModelActor,
         pg=pg,
+        # 当使用 PG 时以分数 GPU（0.2）声明单个 Ray Actor 的配额，便于多个 Actor 共置在同一组资源内；
+        # 否则每个 Ray Actor 申请整卡资源（1），避免与其它角色抢占。
         num_gpus_per_actor=0.2 if pg else 1,
         duplicate_actors=args.ring_attn_size * args.ds_tensor_parallel_size,
     )
 
-    if args.init_kl_coef <= 0:
+    if args.init_kl_coef <= 0:    
         ref_model = None
     else:
         ref_model = RayActorGroup(
@@ -91,11 +123,13 @@ def train(args):
             args.ref_num_gpus_per_node,
             ReferenceModelActor,
             pg=pg,
+            # 参考模型与 Actor 共置时也采用分数 GPU 声明，保证资源策略一致。
             num_gpus_per_actor=0.2 if pg else 1,
             duplicate_actors=args.ring_attn_size * args.ds_tensor_parallel_size,
         )
 
     if not args.colocate_all_models:
+        # 若不共置所有模型（包含 vLLM），后续模块不再共享此 PG
         pg = None
 
     # if colocated, create placement group for critic and reward model explicitly.
@@ -105,6 +139,7 @@ def train(args):
             and args.critic_num_gpus_per_node == args.reward_num_gpus_per_node
         ), f"num_nodes and num_gpus_per_node must be the same when colocate critic and reward model."
 
+        # 为 Critic 与 Reward 共置单独创建一个 PG，避免与 Actor/Ref/vLLM 的 PG 相互干扰。
         bundles = [{"GPU": 1, "CPU": 1} for _ in range(args.critic_num_nodes * args.critic_num_gpus_per_node)]
         pg = placement_group(bundles, strategy="PACK")
         ray.get(pg.ready())
@@ -115,6 +150,7 @@ def train(args):
             args.critic_num_gpus_per_node,
             CriticModelActor,
             pg=pg,
+            # 与上同理：若启用 PG，采用分数 GPU 声明；否则整卡。
             num_gpus_per_actor=0.2 if pg else 1,
             duplicate_actors=args.ring_attn_size * args.ds_tensor_parallel_size,
         )
@@ -136,11 +172,14 @@ def train(args):
         reward_model = None
 
     if args.async_train:
+        # 异步训练器：适用于流水线化/并行度更高的场景
         from openrlhf.trainer.ppo_trainer_async import PPOTrainerAsync as PPOTrainer
     else:
+        # 同步训练器：更新节奏与环节更可控
         from openrlhf.trainer.ppo_trainer import PPOTrainer
 
     # init PPO trainer (Single controller)
+    # 组装远程 PPOTrainer，传入策略、各角色 ActorGroup、vLLM 引擎及生成参数。
     ppo_trainer = PPOTrainer.remote(
         args.pretrain,
         strategy,
@@ -160,9 +199,11 @@ def train(args):
         top_p=args.top_p,
     )
     # training update steps
+    # 获取训练的最大步数（可能与数据长度、epoch、batch 策略相关），用于进度控制与学习率调度初始化等。
     max_steps = ray.get(ppo_trainer.get_max_steps.remote())
 
     # init reference/reward/actor model
+    # 异步加载各模型（from_pretrained），不同角色可并行初始化以提升启动速度。
     refs = []
     if ref_model is not None:
         refs.extend(ref_model.async_init_model_from_pretrained(strategy, args.pretrain))
@@ -174,13 +215,16 @@ def train(args):
     if args.critic_pretrain:
         # critic scheduler initialization depends on max_step, so we have to init critic after actor
         # TODO: use first reward model as critic model
+        # 先初始化 Actor 再初始化 Critic：因为 Critic 的调度/步数依赖 Actor 的 max_steps 信息。
         refs.extend(critic_model.async_init_model_from_pretrained(strategy, args.critic_pretrain, max_steps))
         ray.get(refs)
 
     # train actor and critic model
+    # 启动远程训练任务（同步/异步取决于前面的选择）。
     ray.get(ppo_trainer.fit.remote())
 
     # save model
+    # 保存 Actor 权重（Ref/Reward 通常无需保存；可选保存 Critic）。
     ray.get(actor_model.async_save_model())
 
     if args.critic_pretrain and args.save_value_network:
@@ -483,8 +527,8 @@ if __name__ == "__main__":
     if args.advantage_estimator in ["rloo", "reinforce_baseline", "group_norm"]:
         assert args.n_samples_per_prompt > 1, f"{args.advantage_estimator} requires n_samples_per_prompt > 1"
 
-    if args.remote_rm_url:
-        args.remote_rm_url = args.remote_rm_url.split(",")
+    # if args.remote_rm_url:
+    #     args.remote_rm_url = args.remote_rm_url.split(",")
 
     if args.input_template and "{}" not in args.input_template:
         print("[Warning] {} not in args.input_template, set to None")

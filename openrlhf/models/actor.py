@@ -104,6 +104,8 @@ class Actor(nn.Module):
                     lora_dropout=lora_dropout,
                     bias="none",
                 )
+                print('11111111111')
+                print(lora_alpha)
                 self.model = get_peft_model(self.model, lora_config)
 
                 if load_in_4bit:

@@ -5,6 +5,8 @@ from dataclasses import dataclass, fields
 from datetime import timedelta
 from typing import Any, List, Tuple, Union
 
+from numpy import append
+
 import ray
 import torch
 
@@ -213,8 +215,7 @@ def update_samples_with_rewards(rewards_info, samples_list):
         samples_list: List of Experience objects to update
     """
     # Process rewards and scores
-    samples_len = [len(sample.sequences) for sample in samples_list]
-
+    samples_len = [len(sample.sequences) for sample in samples_list]   # 获取每个样本的序列长度(token个数)
     rewards_list = torch.cat([info["rewards"] for info in rewards_info], dim=0).split(samples_len)
     if "scores" in rewards_info[0]:
         scores_list = torch.cat([info["scores"] for info in rewards_info], dim=0).split(samples_len)
@@ -233,7 +234,7 @@ def update_samples_with_rewards(rewards_info, samples_list):
 
     # Update samples with rewards, scores and extra logs
     for i, samples in enumerate(samples_list):
-        samples.rewards = rewards_list[i]
+        samples.rewards = rewards_list[i]  # 既可能是token-level的奖励，也可能是sample-level的奖励
         samples.scores = scores_list[i]
         samples.info["score"] = scores_list[i]
         samples.info["reward"] = rewards_list[i]
@@ -307,9 +308,13 @@ class SamplesGenerator:
             List of Experience objects containing generated samples
         """
         from vllm import SamplingParams
+        # 说明：SamplingParams 是 vLLM 的采样配置对象，用于指定解码时的采样/截断策略
+        # 包括温度、top-p、top-k、最大/最小生成长度、是否跳过特殊符号、是否把停止词包含进输出等。
 
         llms = self.vllm_engines
         args = self.strategy.args
+        # llms：一组 vLLM 引擎（通常是 Ray Actor 封装的远端推理服务）
+        # args：训练/采样的全局参数对象，从 strategy 中继承
 
         # Set up sampling parameters
         sampling_params = SamplingParams(
@@ -322,14 +327,25 @@ class SamplesGenerator:
             include_stop_str_in_output=True,
             logprobs=1 if self.strategy.args.enable_vllm_is_correction else None,
         )
+        # 关键参数释义：
+        # - temperature：温度采样，越小越保守，越大越发散
+        # - top_p / top_k：核采样/Top-K 采样的截断阈值
+        # - max_tokens / min_tokens：控制生成回复的 token 上限/下限
+        # - skip_special_tokens：是否在解码文本时丢弃特殊 token（如 EOS）
+        # - include_stop_str_in_output：命中停止字符串时是否保留到输出里
+        # - logprobs：当启用 vLLM IS-correction 时，请求返回每个生成 token 的对数概率
         max_response_length = kwargs.get("max_new_tokens", 1024)
         truncate_length = self.prompt_max_len + max_response_length
+        # truncate_length：总序列最大长度上限 = prompt 最大长度 + 回复最大长度
+        # 用于后续将拼接后的序列统一裁剪，避免过长导致显存或后处理开销过大
 
         # Expand prompt list based on the number of samples per prompt
         n_samples_per_prompt = kwargs.pop("n_samples_per_prompt", args.n_samples_per_prompt)
         all_prompts = sum([[prompt] * n_samples_per_prompt for prompt in all_prompts], [])
         all_labels = sum([[label] * n_samples_per_prompt for label in all_labels], [])
         all_prompt_token_ids = self.tokenize_fn(all_prompts, self.prompt_max_len, padding=False)["input_ids"]
+        # 这里会把每条 prompt 复制 n 次（做多样性采样），并在不 padding 的前提下拿到每条 prompt 的 token 序列
+        # 注意：不 padding 可以减少无效计算，便于把 prompt 按长度分发到不同引擎
 
         # Distribute requests to engines and collect responses
         refs = []
@@ -338,86 +354,150 @@ class SamplesGenerator:
             prompt_token_ids = all_prompt_token_ids[i * batch_size : (i + 1) * batch_size]
             refs.append(llm.add_requests.remote(sampling_params=sampling_params, prompt_token_ids=prompt_token_ids))
         ray.get(refs)
+        # 将请求按近似均匀的批大小切分并分发给各个 vLLM 引擎；
+        # ray.get(refs) 用于确保所有请求已成功提交（而非等待生成完成）。
 
         # Retrieve and combine results from all outputs
         all_output_refs = []
         for i, llm in enumerate(llms):
             all_output_refs.append(llm.get_responses.remote())
+        print("get responses")
+        # 收集所有 vLLM 引擎的响应结果
+        # all_outputs 是一个列表，每个元素都是一个 output 对象
+        # output 对象包含 prompt_token_ids 和 outputs 列表
         all_outputs = sum(ray.get(all_output_refs), [])
+        # 这里再统一收集各引擎返回的生成结果，并按顺序合并为一个列表。
 
         # Process outputs into Experience objects
+        # 遍历每个 vLLM 引擎返回的 output，将其转换为 Experience 对象
         samples_list = []
         for i in range(len(all_outputs)):
+            # all_outputs[i] 是一个 output 对象，包含：
+            # - prompt_token_ids: 输入的 prompt 的 token IDs
+            # - outputs: 包含生成响应的列表（通常只有一个元素）
             output = all_outputs[i]
             prompt = all_prompts[i]
             label = all_labels[i]
+            # 将第 i 个输出与对应的 prompt/label 对齐，保证后续监督信号与采样结果一一对应。
+            
+            # output 结构说明（来自 vLLM 引擎返回）：
+            # output = {
+            #     'prompt_token_ids': [1, 2, 3, ...],  # 输入的 prompt 的 token IDs
+            #     'outputs': [                          # 这是一个列表，包含生成的响应
+            #         {
+            #             'token_ids': [100, 101, 102, ...],  # 生成的 response 的 token IDs
+            #             'logprobs': [                        # 每个生成位置的概率分布字典列表
+            #                 {100: LogprobInfo(logprob=-2.1), 101: LogprobInfo(logprob=-1.8), ...},  # 第0个位置
+            #                 {200: LogprobInfo(logprob=-1.5), 201: LogprobInfo(logprob=-2.3), ...},  # 第1个位置
+            #                 # ... 每个位置包含所有可能token的概率分布
+            #             ]
+            #             # 其他可能的字段...
+            #         }
+            #         # 理论上可能有多个输出，但通常只有一个
+            #     ]
+            # }
+            # 注意：outputs[0] 表示第一个（通常也是唯一的）生成响应
 
             # Concatenate prompt and output tokens
-            input_ids = list(output.prompt_token_ids) + list(output.outputs[0].token_ids)
+            # output.outputs[0] 获取第一个生成响应（通常也是唯一的）
+            # output.outputs[0].token_ids 包含生成的 response 的 token IDs
+            input_ids = list(output.prompt_token_ids) + list(output.outputs[0].token_ids)   #拼接输入和输出序列
+
             attention_mask = [1] * len(input_ids)
+            # attention_mask：与 input_ids 等长，1 表示有效 token，0 表示 padding；这里无 padding，故全为 1。
 
             sequences = torch.tensor(input_ids)
+
             attention_mask = torch.tensor(attention_mask)
 
             # Create action mask based on output token positions
             action_mask = torch.zeros_like(attention_mask)
+            # 获取生成响应的长度，用于后续创建 action_mask
             response_length = len(output.outputs[0].token_ids)
-            action_mask[len(output.prompt_token_ids) : len(output.prompt_token_ids) + response_length] = 1
+            # 将 response 部分（从 prompt 结束位置开始）的 mask 设为 1，prompt 部分保持为 0
+            action_mask[len(output.prompt_token_ids) : len(output.prompt_token_ids) + response_length] = 1   #把response部分mask为1，prompt为0
+            # action_mask：用于区分「动作」(response) 与「上下文」(prompt) 的位置，
+            # 只有 response 部分为 1，会参与策略梯度/优势计算，prompt 部分为 0。
 
             # Calculate rollout log probs
             rollout_log_probs = None
-            if self.strategy.args.enable_vllm_is_correction:
+            if self.strategy.args.enable_vllm_is_correction:   # 默认不使用
                 rollout_log_probs = []
+                # 获取生成响应的 token IDs，用于后续计算对数概率
                 response_ids = list(output.outputs[0].token_ids)
+                # 遍历每个生成 token 的对数概率
+                # output.outputs[0].logprobs 是一个列表，每个元素包含该位置所有可能 token 的概率分布
                 for i, logprob in enumerate(output.outputs[0].logprobs):
+                    # 从概率分布中提取实际生成 token 的对数概率
                     rollout_log_probs.append(logprob[response_ids[i]].logprob)
 
                 rollout_log_probs = torch.tensor([0.0] * len(list(output.prompt_token_ids)) + rollout_log_probs)
                 rollout_log_probs = rollout_log_probs[1:truncate_length].to("cpu")
+                # 当启用 IS-correction：
+                # - vLLM 会返回每个生成 token 的对数概率，这里将其与 prompt 的长度对齐（在前面补零）
+                # - 然后裁剪到 truncate_length，并放到 CPU，便于后续经验拼接与节省显存
 
             sequences = sequences[:truncate_length].to("cpu")
             attention_mask = attention_mask[:truncate_length].to("cpu")
             action_mask = action_mask[1:truncate_length].to("cpu")
             total_length = attention_mask.float().sum()
             is_clipped = response_length >= max_response_length
+            # 注意：action_mask 从索引 1 开始裁剪，以与后续右移对齐的行为保持一致（常见于自回归训练场景）。
+            # total_length：当前序列总 token 数（用于动态 batch 切分等），is_clipped：回复是否命中最大长度上限。
 
             info = {
                 "response_length": torch.tensor([response_length]),
                 "total_length": torch.tensor([total_length]),
                 "response_clip_ratio": torch.tensor([is_clipped]),
             }
+            # info 中记录每条样本的统计量：
+            # - response_length：回复 token 数
+            # - total_length：总序列长度（prompt+response）
+            # - response_clip_ratio：是否发生了最大长度裁剪（布尔值）
 
             rollout_samples = Experience(
-                sequences=sequences.unsqueeze(0),
-                attention_mask=attention_mask.unsqueeze(0),
-                action_mask=action_mask.unsqueeze(0),
+                sequences=sequences.unsqueeze(0),      #完整的token序列
+                attention_mask=attention_mask.unsqueeze(0),   #掩码
+                action_mask=action_mask.unsqueeze(0),     #区分动作(response)和prompt
                 rollout_log_probs=rollout_log_probs.unsqueeze(0) if rollout_log_probs is not None else None,
                 prompts=[prompt],
                 labels=[label],
                 info=info,
             )
             samples_list.append(rollout_samples)
+            # 每个 output 构造成一个 Experience（批维度为 1）：
+            # - sequences/attention_mask/action_mask：张量形状统一
+            # - prompts/labels：以列表形式保存原文本与标签
+            # - rollout_log_probs：仅在启用 IS-correction 时可用
 
         # Get rewards from remote reward models if needed
         # This is required by dynamic sampling
         remote_reward_model = kwargs.get("remote_reward_model", None)
+        print(remote_reward_model)
         if remote_reward_model:
+            print("get rewards")
             all_queries = sum(
                 [
                     self.tokenizer.batch_decode(
-                        remove_pad_token(s.sequences, s.attention_mask), skip_special_tokens=False
+                        remove_pad_token(s.sequences, s.action_mask), skip_special_tokens=False   #原先是attention_mask
                     )
                     for s in samples_list
                 ],
                 [],
-            )
+            )   
             all_prompts = sum([s.prompts for s in samples_list], [])
             all_labels = sum([s.labels for s in samples_list], [])
+            # 如果传入了远端奖励模型（如环境、HTTP 服务或自定义函数），
+            # 我们需要把当前生成的 query（prompt+response）与 prompt/label 一并发送以获取奖励信息。
+            # 这里 decode 时选择 skip_special_tokens=False，确保用于奖励模型的输入更贴近真实模型输出。
 
             # Get rewards info from remote model
             rewards_info = ray.get(remote_reward_model.get_rewards.remote(all_queries, all_prompts, all_labels))
             # Process rewards and scores
             update_samples_with_rewards(rewards_info, samples_list)
+            # 将远端返回的奖励/评分/额外日志写回到每条 Experience，供后续优势估计与日志记录使用。
+        else:
+            print("no rewards in rollout")
 
         return samples_list
 
@@ -453,7 +533,7 @@ class RemoteExperienceMaker(ABC):
 
     def split_rollout_samples(self, rollout_samples):
         for i, sample in enumerate(rollout_samples):
-            sample.index = [i]
+            sample.index = [i]    # 标记每个sample的位置
 
         samples_list = []
         if self.args.use_dynamic_batch:
@@ -478,7 +558,7 @@ class RemoteExperienceMaker(ABC):
                 concat_samples = Experience.concat_experiences(micro_batch, self.tokenizer.pad_token_id)
                 samples_list.append(concat_samples)
         else:
-            batch_size = self.args.micro_rollout_batch_size
+            batch_size = self.args.micro_rollout_batch_size     # 按照 micro_rollout_batch_size 的大小分组
             for i in range(0, len(rollout_samples), batch_size):
                 concat_samples = Experience.concat_experiences(
                     rollout_samples[i : i + batch_size], self.tokenizer.pad_token_id
@@ -496,8 +576,10 @@ class RemoteExperienceMaker(ABC):
         After that, we will calculate the advantages and returns for each experience.
         """
         # Each batch of samples will be scheduled to a effective Ray Actor (i.e, a DP rank)
-        samples_list = self.split_rollout_samples(rollout_samples)
-
+        samples_list = self.split_rollout_samples(rollout_samples)   # list里 micro_rollout_batch_size个experience打包成一个experience
+        print("finish split samples")
+        print(f"sample list里的样本数量是{len(samples_list)}")
+        print(samples_list[0])
         # Make experiences (models forward: logprobs, values, rewards, and kl divergence)
         experiences = self.make_experience(samples_list)
 
@@ -520,23 +602,43 @@ class RemoteExperienceMaker(ABC):
         # Convert samples into lists of tensors and metadata for batch processing
         sequences_list = [s.sequences for s in samples_list]
         attention_mask_list = [s.attention_mask for s in samples_list]
-        action_mask_list = [s.action_mask for s in samples_list]
+        action_mask_list = [s.action_mask for s in samples_list] 
+        reward_action = []  # 恢复为减少前的 action_mask（在前面补一个 0），输出形状统一为 [bs, L+1]
+        for am in action_mask_list:
+            # 规范形状为 [bs, L]
+            print(f"am的形状是{am.shape}")
+            if am.dim() == 1:
+                am_2d = am.unsqueeze(0)
+            elif am.dim() == 2:
+                am_2d = am
+            else:
+                am_2d = am.view(am.size(0), -1)
+
+            bs = am_2d.size(0)
+            leading_zero_col = torch.zeros(bs, 1, dtype=am_2d.dtype, device=am_2d.device)
+            full_mask_2d = torch.cat([leading_zero_col, am_2d], dim=1)
+            print(f"full_mask_2d的形状是{full_mask_2d.shape}")
+            reward_action.append(full_mask_2d)
 
         # The rewards are already filled in the samples_list, such as the agent's environment rewards
         if samples_list[0].rewards is not None:
             pass
         elif self.remote_rm_url:
+            print("no rewards and now get")
             queries_list = sum(
                 [
-                    self.tokenizer.batch_decode(remove_pad_token(seq, attention_mask), skip_special_tokens=False)
-                    for seq, attention_mask in zip(sequences_list, attention_mask_list)
+                    self.tokenizer.batch_decode(remove_pad_token(seq, action_mask), skip_special_tokens=False)
+                    for seq, action_mask in zip(sequences_list, reward_action)
                 ],
                 [],
             )
+            # print(queries_list[0])
+            print("finish decode response for rewards")
             prompts_list = sum([s.prompts for s in samples_list], [])
             labels_list = sum([s.labels for s in samples_list], [])
             # Keep the remote call asynchronous
             r_refs = self.remote_reward_model.get_rewards.remote(queries_list, prompts_list, labels_list)
+            print("wait for getting rewards")
         else:
             # Batch call reward model
             r_refs = self.reward_model_group.async_run_method_batch(
@@ -557,7 +659,8 @@ class RemoteExperienceMaker(ABC):
             sequences=sequences_list,
             action_mask=action_mask_list,
             attention_mask=attention_mask_list,
-        )
+        )     # old策略输出的概率
+        print("wait for getting old logit_probs")
 
         # Sync to avoid GPU OOM when colocate models
         if args.colocate_all_models or args.colocate_actor_ref:
@@ -589,7 +692,8 @@ class RemoteExperienceMaker(ABC):
                 sequences=sequences_list,
                 action_mask=action_mask_list,
                 attention_mask=attention_mask_list,
-            )
+            )     # ref策略输出的概率
+            print("wait for getting ref logit_probs")
 
             if args.colocate_all_models or args.colocate_actor_ref:
                 ray.get(base_action_log_probs_ref)
@@ -603,8 +707,11 @@ class RemoteExperienceMaker(ABC):
         # Note: the results duplicated ring_attn_size * ds_tensor_parallel_size times
         # This is because the actors in ring group and tp group will return the same output
         duplicate_factor = args.ring_attn_size * args.ds_tensor_parallel_size
+        print("get old logit_probs")
         action_log_probs_list = sum(ray.get(action_log_probs_ref)[::duplicate_factor], [])
+        print("get ref logit_probs")
         base_action_log_probs_list = sum(ray.get(base_action_log_probs_ref)[::duplicate_factor], [])
+        print("finish logit_probs")
         value_list = sum(ray.get(value_ref)[::duplicate_factor], [])
 
         # Process rewards based on source
@@ -612,8 +719,10 @@ class RemoteExperienceMaker(ABC):
             pass
         elif self.remote_rm_url:
             # Get rewards info from remote model
+            print("get rewards now")
             rewards_info = ray.get(r_refs)
             # Process rewards and scores
+            print("update rewards")
             update_samples_with_rewards(rewards_info, samples_list)
         else:
             # Reward Model
@@ -644,8 +753,8 @@ class RemoteExperienceMaker(ABC):
                 base_action_log_probs = None
 
             # Update experience with new information
-            samples.action_log_probs = action_log_probs
-            samples.base_action_log_probs = base_action_log_probs
+            samples.action_log_probs = action_log_probs    # old的action_log_probs
+            samples.base_action_log_probs = base_action_log_probs     
             samples.values = value
             samples.kl = kl
             samples.info["kl"] = kl_mean
@@ -694,14 +803,36 @@ class RemoteExperienceMaker(ABC):
                         # Apply penalty to the j-th reward in this experience
                         experience.rewards[j] += overlong_penalty
 
-        # get rewards from experiences
-        exp_len = [len(experience.index) for experience in experiences]
-        # indices is an identity mapping when not using dynamic batch; otherwise, it maps back to the original indices after rearange samples
+        # 获取每个 experience 中样本的数量（用于后续分割）
+        # exp_len[i] 表示第 i 个 experience 包含多少个样本
+        exp_len = [len(experience.index) for experience in experiences]    
+        
+        # 构建原始位置索引映射
+        # indices 的作用：
+        # - 当不使用动态批处理时：indices = [0, 1, 2, 3, ...]（身份映射）
+        # - 当使用动态批处理时：indices 记录了每个样本在原始 rollout_samples 中的位置
+        # 例如：如果样本被重新排列，indices 可能是 [2, 0, 4, 1, 3, ...]
         indices = torch.tensor(sum([experience.index for experience in experiences], []))
+        
+        # 将所有 experience 的奖励拼接成一个大的张量
+        # raw_rewards 的形状：(total_samples,)，包含所有样本的原始奖励
+        # 注意：这里的顺序可能与原始生成顺序不同（如果使用了动态批处理）
         raw_rewards = torch.cat([experience.rewards for experience in experiences], dim=0)
+         
+        # 创建一个空的奖励张量，用于存储重排序后的奖励
         rewards = torch.empty_like(raw_rewards)
+        
+        # 使用 indices 将原始奖励重新排序到正确位置
+        # rewards[indices] = raw_rewards 的含义：
+        # - 将 raw_rewards[0] 放到 rewards[indices[0]] 位置
+        # - 将 raw_rewards[1] 放到 rewards[indices[1]] 位置
+        # - 以此类推，恢复原始的顺序
         rewards[indices] = raw_rewards  # sorted
-
+        
+        # 将一维奖励重塑为二维，便于组内处理
+        # 重塑后的形状：(num_prompts, n_samples_per_prompt)
+        # 例如：如果有 3 个 prompt，每个 prompt 生成 2 个样本，则形状为 (3, 2)
+        # 这样便于后续进行 GRPO 的组内奖励整形（如减去组内均值、计算组内标准差等）
         rewards = rewards.reshape(-1, args.n_samples_per_prompt)
 
         # log group reward std
@@ -723,7 +854,7 @@ class RemoteExperienceMaker(ABC):
         elif args.advantage_estimator == "group_norm":
             rewards = (rewards - rewards.mean(-1, keepdim=True)) / (rewards.std(-1, keepdim=True) + 1e-9)
 
-        rewards = rewards.reshape(-1)[indices].split(exp_len)
+        rewards = rewards.reshape(-1)[indices].split(exp_len)  #展平为一维，然后根据exp_len分割
 
         # calculate return and advantages
         for experience, reward in zip(experiences, rewards):

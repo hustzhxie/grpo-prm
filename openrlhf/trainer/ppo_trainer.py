@@ -463,12 +463,15 @@ class PPOTrainer(BasePPOTrainer):
 
             filtered_samples = []
             number_of_samples = 0
-            for _, rand_prompts, labels in self.prompts_dataloader:
-                remote_reward_model = self.remote_reward_model if self.args.dynamic_filtering else None
+            # 遍历数据集
+            for _, rand_prompts, labels in self.prompts_dataloader:    # rand_prompts是一个batch的prompts，labels是一个batch的labels
+                remote_reward_model = self.remote_reward_model if self.args.dynamic_filtering else None   #如果需要动态过滤奖励，则使用远程奖励模型，否则不使用
                 rollout_samples = self.samples_generator.generate_samples(
                     rand_prompts, labels, remote_reward_model=remote_reward_model, **self.generate_kwargs
-                )
+                )   # 数量为rollout_batch_size * n_samples_per_prompt   
                 pbar.update()
+                print(f"rollout_samples中的数量为{len(rollout_samples)}")
+                print(rollout_samples[0])
 
                 # dynamic filtering
                 pass_rate = None
@@ -486,7 +489,7 @@ class PPOTrainer(BasePPOTrainer):
                         # Check if average reward is within the specified range
                         min_reward, max_reward = self.args.dynamic_filtering_reward_range
                         if min_reward + 1e-6 < avg_reward < max_reward - 1e-6:
-                            filtered_samples.extend(batch_samples)
+                            filtered_samples.extend(batch_samples)   #只把平均奖励在区间内的样本保留
 
                     # Continue sampling if filtered samples are insufficient
                     if len(filtered_samples) / self.args.n_samples_per_prompt < self.args.rollout_batch_size:
@@ -494,12 +497,14 @@ class PPOTrainer(BasePPOTrainer):
                             f"filtered_samples {len(filtered_samples) / self.args.n_samples_per_prompt} < rollout_batch_size {self.args.rollout_batch_size}, continue sampling"
                         )
                         continue
-
+                    
+                    #完成了一个批次内的筛选
                     pass_rate = len(filtered_samples) / number_of_samples * 100
                     logger.info(
                         f"Dynamic filtering pass rate: {pass_rate:.2f}% ({len(filtered_samples)}/{number_of_samples})"
                     )
                     rollout_samples = filtered_samples[: self.args.rollout_batch_size * self.args.n_samples_per_prompt]
+                    #此时rollout_samples为过滤后的所有样本
                     filtered_samples = []
                     number_of_samples = 0
 
@@ -507,10 +512,10 @@ class PPOTrainer(BasePPOTrainer):
                 sample0 = self.tokenizer.batch_decode(
                     experiences[0].sequences[0].unsqueeze(0), skip_special_tokens=True
                 )
-                print(sample0)
+                print(sample0)   #输出一个示例
 
                 # balance experiences across dp
-                if args.use_dynamic_batch:
+                if args.use_dynamic_batch:   # 默认不使用
                     experiences = balance_experiences(experiences, args)
 
                 refs = self.actor_model_group.async_run_method_batch(method_name="append", experience=experiences)
