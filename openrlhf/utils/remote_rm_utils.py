@@ -356,6 +356,8 @@ from transformers import AutoModel, AutoTokenizer
 import torch.nn.functional as F
 import os
 from tqdm import tqdm
+import math
+import re
 
 class ProcessRewardModel:
     """专门的过程奖励模型"""
@@ -398,16 +400,62 @@ class ProcessRewardModel:
             print(f"Failed to load PRM model: {e}")
             raise
 
-    def process_reward(self, step_rewards):  # step_rewards是步骤奖励的列表
-        lamda = 0.4     # 阈值
-        k = 0.5       # 衰减系数
-        result = 1.0
-        for i, step_reward in enumerate(step_rewards):
-            if step_reward < lamda:
-                result = k ** (len(step_rewards) - i - 1)
-                break
-        scores_tensor = torch.tensor(result, dtype=torch.float32).unsqueeze(0)
-        return scores_tensor
+    def process_reward(self, outcome_reward, step_rewards):    # step_rewards是步骤奖励的列表
+        def compute_entropy(step_reward):
+            # 计算熵
+            epsilon = 1e-8  # 添加一个小的正数避免对 0 或负数取对数
+            step_reward = max(epsilon, min(1 - epsilon, step_reward))
+            entropy = -((step_reward) * math.log(step_reward) + (1 - step_reward) * math.log(1 - step_reward))
+            return entropy
+
+        lamda = 0.5     # 阈值
+        k = 2       # 衰减系数
+        scores = 1.0
+        N = len(step_rewards)    # 步骤的数量
+
+        if outcome_reward == 1.0:
+            # 结果正确的情况
+            for i, step_reward in enumerate(step_rewards):
+                if step_reward < lamda:
+                    step_entropy = compute_entropy(step_reward)
+                    k_d = k * (1 - step_entropy/compute_entropy(0.5))      # 这里衰减系数k可以用别的方法确定
+                    scores = scores * math.exp(-k_d * (N - i - 1)/N)
+                    return scores
+            return scores
+        else:
+            # 结果错误的情况
+            for i, step_reward in enumerate(step_rewards):
+                if step_reward < lamda: 
+                    if i == 0:
+                        return 0.0
+                    else:
+                        step_entropy = compute_entropy(step_rewards[i-1])
+                        k_d = k * (1 - step_entropy/compute_entropy(0.5))      # 这里衰减系数k可以用别的方法确定
+                        scores = scores * (1 - math.exp(-k_d * i/N))
+                        return scores
+            return scores * (1 - math.exp(-k))
+
+
+    def get_outcome_reward(self, response: str, gt: str) -> float:
+        """
+        response: 模型输出（包含推理步骤 + 最终答案）
+        gt: ground truth 正确答案
+        """
+        # 匹配 \boxed{ ... } 中的内容
+        match = re.search(r"\\boxed\{([^}]*)\}", response)
+        
+        if not match:
+            # 没找到 boxed 答案 → reward = 0
+            return 0.0
+
+        pred = match.group(1).strip()   # 提取预测答案
+        
+        # 比较预测答案和gt
+        if pred == gt.strip():
+            return 1.0
+        else:
+            return 0.0
+
 
     def extract_steps_from_response(self, response_text: str):
         # 按 \n\n 切分，去掉首尾空白，并过滤空串
@@ -417,18 +465,22 @@ class ProcessRewardModel:
         """计算过程奖励"""
         rewards_info = []
         print("begin rewards")
-        for query, prompt in tqdm(zip(queries, prompts), total=len(queries), desc="Computing rewards"):
+        for query, prompt, label in tqdm(zip(queries, prompts, labels), total=len(queries), desc="Computing rewards"):
             try:
+                outcome_reward = self.get_outcome_reward(query, label)
                 step_rewards = self.compute_step_rewards(query, prompt)
+                print(f"结果奖励是{outcome_reward}")
                 print(step_rewards[0])
                 print(len(step_rewards))
             except Exception as e:
                 print(f"Error computing reward for one query: {e}")
                 step_rewards = [0.5]
-            step_tensor = torch.tensor(step_rewards)
-            scores = step_tensor.sum()
-            scores_tensor = scores.unsqueeze(0)
+            # step_tensor = torch.tensor(step_rewards)
+            # scores = step_tensor.sum()
+            # scores_tensor = scores.unsqueeze(0)
             # scores_tensor = self.process_reward(step_rewards)
+            scores = self.process_reward(outcome_reward, step_rewards)
+            scores_tensor = torch.tensor([scores])
             rewards_info.append({
                 "rewards": scores_tensor,
                 "scores": scores_tensor,
