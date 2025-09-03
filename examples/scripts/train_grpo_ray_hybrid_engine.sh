@@ -15,7 +15,7 @@ python3 -m openrlhf.cli.train_ppo_ray \
    --actor_num_gpus_per_node 1 \
    --vllm_num_engines 1 \
    --vllm_tensor_parallel_size 1 \
-   --vllm_gpu_memory_utilization 0.5 \
+   --vllm_gpu_memory_utilization 0.85 \
    --init_kl_coef 1e-3 \
    --gamma 1.0 \
    --use_kl_loss \
@@ -27,6 +27,7 @@ python3 -m openrlhf.cli.train_ppo_ray \
    --save_path /home/yanzhe/OpenRLHF/checkpoint/GRPO/Qwen2.5-Math-1.5B-Instruct_lora \
    --ckpt_path /home/yanzhe/OpenRLHF/checkpoint/GRPO/Qwen2.5-Math-1.5B-Instruct_lora/ckpt \
    --save_hf_ckpt \
+   --save_steps 1 \
    --micro_train_batch_size 2 \
    --train_batch_size 16 \
    --micro_rollout_batch_size 2 \

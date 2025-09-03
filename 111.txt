@@ -4,3 +4,7 @@ prm:  Qwen/Qwen2.5-Math-PRM-7B     Skywork/Skywork-o1-Open-PRM-Qwen-2.5-1.5B
 
 
 --vllm_gpu_memory_utilization 0.6 \
+
+git add .
+git commit -m 'wyz'
+git push -u origin main

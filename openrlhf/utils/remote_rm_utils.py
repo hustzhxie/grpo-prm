@@ -400,7 +400,7 @@ class ProcessRewardModel:
             print(f"Failed to load PRM model: {e}")
             raise
 
-    def process_reward(self, outcome_reward, step_rewards):    # step_rewards是步骤奖励的列表
+    def process_reward(self, outcome_reward, step_rewards, k_method):    # step_rewards是步骤奖励的列表
         def compute_entropy(step_reward):
             # 计算熵
             epsilon = 1e-8  # 添加一个小的正数避免对 0 或负数取对数
@@ -412,13 +412,20 @@ class ProcessRewardModel:
         k = 2       # 衰减系数
         scores = 1.0
         N = len(step_rewards)    # 步骤的数量
+        a = 1     # k计算时用 p2 方法的系数
+        b = 1     # k计算时用 p3 方法的系数
 
         if outcome_reward == 1.0:
             # 结果正确的情况
             for i, step_reward in enumerate(step_rewards):
                 if step_reward < lamda:
                     step_entropy = compute_entropy(step_reward)
-                    k_d = k * (1 - step_entropy/compute_entropy(0.5))      # 这里衰减系数k可以用别的方法确定
+                    if k_method == "p1":
+                        k_d = k * (1 - step_entropy/compute_entropy(0.5))      # 这里衰减系数k可以用别的方法确定
+                    elif k_method == "p2":
+                        k_d = k * math.epx(-a * step_entropy)
+                    elif k_method == "p3":
+                        k_d = k / (1 + math.exp(b * (step_entropy - compute_entropy(0.5))))      # 这里衰减系数k可以用别的方法确定
                     scores = scores * math.exp(-k_d * (N - i - 1)/N)
                     return scores
             return scores
@@ -430,7 +437,12 @@ class ProcessRewardModel:
                         return 0.0
                     else:
                         step_entropy = compute_entropy(step_rewards[i-1])
-                        k_d = k * (1 - step_entropy/compute_entropy(0.5))      # 这里衰减系数k可以用别的方法确定
+                        if k_method == "p1":
+                            k_d = k * (1 - step_entropy/compute_entropy(0.5))      # 这里衰减系数k可以用别的方法确定
+                        elif k_method == "p2":
+                            k_d = k * math.epx(-a * step_entropy)
+                        elif k_method == "p3":
+                            k_d = k / (1 + math.exp(b * (step_entropy - compute_entropy(0.5))))      # 这里衰减系数k可以用别的方法确定
                         scores = scores * (1 - math.exp(-k_d * i/N))
                         return scores
             return scores * (1 - math.exp(-k))
@@ -465,6 +477,7 @@ class ProcessRewardModel:
         """计算过程奖励"""
         rewards_info = []
         print("begin rewards")
+        k_method = "p1"     # 给出三个计算 k 的 method p1, p2, p3
         for query, prompt, label in tqdm(zip(queries, prompts, labels), total=len(queries), desc="Computing rewards"):
             try:
                 outcome_reward = self.get_outcome_reward(query, label)
@@ -479,7 +492,7 @@ class ProcessRewardModel:
             # scores = step_tensor.sum()
             # scores_tensor = scores.unsqueeze(0)
             # scores_tensor = self.process_reward(step_rewards)
-            scores = self.process_reward(outcome_reward, step_rewards)
+            scores = self.process_reward(outcome_reward, step_rewards, k_method)
             scores_tensor = torch.tensor([scores])
             rewards_info.append({
                 "rewards": scores_tensor,
