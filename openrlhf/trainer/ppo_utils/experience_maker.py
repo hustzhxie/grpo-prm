@@ -9,6 +9,7 @@ from numpy import append
 
 import ray
 import torch
+import time
 
 from openrlhf.models.utils import compute_approx_kl, compute_reward, masked_mean
 from openrlhf.trainer.ray.launcher import RayActorGroup
@@ -215,7 +216,7 @@ def update_samples_with_rewards(rewards_info, samples_list):
         samples_list: List of Experience objects to update
     """
     # Process rewards and scores
-    samples_len = [len(sample.sequences) for sample in samples_list]   # 获取每个样本的序列长度(token个数)
+    samples_len = [len(sample.sequences) for sample in samples_list]   # 获取每个experience中的样本数量
     rewards_list = torch.cat([info["rewards"] for info in rewards_info], dim=0).split(samples_len)
     if "scores" in rewards_info[0]:
         scores_list = torch.cat([info["scores"] for info in rewards_info], dim=0).split(samples_len)
@@ -854,7 +855,11 @@ class RemoteExperienceMaker(ABC):
         elif args.advantage_estimator == "group_norm":
             rewards = (rewards - rewards.mean(-1, keepdim=True)) / (rewards.std(-1, keepdim=True) + 1e-9)
 
-        rewards = rewards.reshape(-1)[indices].split(exp_len)  #展平为一维，然后根据exp_len分割
+        rewards = rewards.reshape(-1)[indices].split(exp_len)  # 展平为一维，然后根据exp_len分割成元组，元组中有多个[bs]大小的张量，此时的reward已经是归一化的优势
+        print(f"此时归一化后的奖励是：{rewards}")
+        # for experience, reward in zip(experiences, rewards):
+        #     experience.advantages = reward
+
 
         # calculate return and advantages
         for experience, reward in zip(experiences, rewards):
@@ -865,6 +870,8 @@ class RemoteExperienceMaker(ABC):
                 action_mask=experience.action_mask,
                 reward_clip_range=args.reward_clip_range,
             )
+            # print(f"此时reward计算完是：{reward},形状是{reward.shape}")
+            # time.sleep(10)
 
             if self.advantage_estimator == "gae":
                 experience.advantages, experience.returns = self.get_advantages_and_returns(
@@ -890,6 +897,8 @@ class RemoteExperienceMaker(ABC):
                     args.gamma,
                 )
                 experience.advantages = deepcopy(experience.returns)
+                # print(f"此时返回是：{experience.returns},形状是{experience.returns.shape}")
+                # print(f"此时优势是：{experience.advantages},形状是{experience.advantages.shape}")
             else:
                 raise Exception(f"Unkown advantage_estimator {self.advantage_estimator}")
 

@@ -186,7 +186,7 @@ class ActorPPOTrainer(ABC):
 
                 short_status = {
                     "act_loss": status["policy_loss"],
-                    "reward": status["reward"],
+                    "reward": status["reward"], 
                     "return": status["return"],
                     "gen_len": status["response_length"],
                     "tot_len": status["total_length"],
@@ -218,6 +218,7 @@ class ActorPPOTrainer(ABC):
         packed_seq_lens = None
         old_action_log_probs = experience.action_log_probs
         advantages = experience.advantages
+        print(f"advantages的值: {advantages}")
         base_action_log_probs = experience.base_action_log_probs
 
         # actor loss

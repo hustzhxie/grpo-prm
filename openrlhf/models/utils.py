@@ -51,7 +51,7 @@ def compute_reward(
     if kl_coef <= 0.0:
         kl_coef = 0.0
 
-    if reward_clip_range:
+    if reward_clip_range:   # 可在参数设置的时候设置
         r = r.clamp(min=reward_clip_range[0], max=reward_clip_range[1])
 
     kl_reward = -kl_coef * kl
