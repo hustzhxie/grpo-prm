@@ -218,7 +218,6 @@ class ActorPPOTrainer(ABC):
         packed_seq_lens = None
         old_action_log_probs = experience.action_log_probs
         advantages = experience.advantages
-        print(f"advantages的值: {advantages}")
         base_action_log_probs = experience.base_action_log_probs
 
         # actor loss

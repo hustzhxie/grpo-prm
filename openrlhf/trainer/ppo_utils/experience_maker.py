@@ -856,7 +856,7 @@ class RemoteExperienceMaker(ABC):
             rewards = (rewards - rewards.mean(-1, keepdim=True)) / (rewards.std(-1, keepdim=True) + 1e-9)
 
         rewards = rewards.reshape(-1)[indices].split(exp_len)  # 展平为一维，然后根据exp_len分割成元组，元组中有多个[bs]大小的张量，此时的reward已经是归一化的优势
-        print(f"此时归一化后的奖励是：{rewards}")
+        # print(f"此时归一化后的奖励是：{rewards}")
         # for experience, reward in zip(experiences, rewards):
         #     experience.advantages = reward
 

@@ -35,8 +35,8 @@ python3 -m openrlhf.cli.train_ppo_ray \
    --n_samples_per_prompt 6 \
    --max_epochs 1 \
    --prompt_max_len 1024 \
-   --max_samples 100 \
-   --generate_max_len 1024 \
+   --max_samples 5000 \
+   --generate_max_len 2048 \
    --zero_stage 3 \
    --bf16 \
    --actor_learning_rate 5e-7 \

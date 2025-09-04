@@ -8,3 +8,7 @@ prm:  Qwen/Qwen2.5-Math-PRM-7B     Skywork/Skywork-o1-Open-PRM-Qwen-2.5-1.5B
 git add .
 git commit -m 'wyz'
 git push -u origin main
+
+pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu126
+pip install -r requirements.txt
+pip install vllm
