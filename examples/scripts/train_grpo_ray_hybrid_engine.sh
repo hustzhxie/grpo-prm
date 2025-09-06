@@ -12,10 +12,10 @@ python3 -m openrlhf.cli.train_ppo_ray \
    --ref_num_nodes 1 \
    --ref_num_gpus_per_node 1 \
    --actor_num_nodes 1 \
-   --actor_num_gpus_per_node 5 \
+   --actor_num_gpus_per_node 1 \
    --vllm_num_engines 1 \
    --vllm_tensor_parallel_size 1 \
-   --vllm_gpu_memory_utilization 0.6 \
+   --vllm_gpu_memory_utilization 0.75 \
    --init_kl_coef 1e-3 \
    --gamma 1.0 \
    --use_kl_loss \
@@ -27,12 +27,12 @@ python3 -m openrlhf.cli.train_ppo_ray \
    --save_path /home/zhxie/OpenRLHF/checkpoint/GRPO/Qwen2.5-Math-1.5B-Instruct_lora \
    --ckpt_path /home/zhxie/OpenRLHF/checkpoint/GRPO/Qwen2.5-Math-1.5B-Instruct_lora/ckpt \
    --save_hf_ckpt \
-   --save_steps 1 \
+   --save_steps 15 \
    --micro_train_batch_size 2 \
    --train_batch_size 4 \
    --micro_rollout_batch_size 2 \
    --rollout_batch_size 4 \
-   --n_samples_per_prompt 6 \
+   --n_samples_per_prompt 8 \
    --max_epochs 1 \
    --prompt_max_len 1024 \
    --max_samples 5000 \

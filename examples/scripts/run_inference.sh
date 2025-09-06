@@ -6,14 +6,14 @@ set -euo pipefail
 # =========================
 
 # 模型与数据集
-MODEL="/home/yanzhe/OpenRLHF/checkpoint/GRPO/Qwen2.5-Math-1.5B-Instruct_lora"           # HF 模型名或本地权重路径
+MODEL="/home/yanzhe/OpenRLHF/checkpoint/GRPO/qwen-math-1.5b-sft-grpo"           # HF 模型名或本地权重路径
 DATASET="HuggingFaceH4/MATH-500"             # HF 数据集名或本地 JSON/JSONL 路径
 INPUT_KEY="problem"                          # 数据集中问题字段名（如 question/prompt/query）
 DATASET_SPLIT="test"                         # 数据集分割：train/validation/test
 EXPORT_SPLIT_TO_DISK=true                     # 将指定 split 预导出到本地，避免 DatasetDict 报错
 
 # 输出
-OUTPUT_PATH="./outputs/math_ins_grpo.jsonl"  # 结果 JSONL 路径
+OUTPUT_PATH="./outputs/math_sft_grpo.jsonl"  # 结果 JSONL 路径
 
 # 生成参数
 MAX_NEW_TOKENS=2048

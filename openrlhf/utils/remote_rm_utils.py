@@ -421,7 +421,7 @@ class ProcessRewardModel:
                 if step_reward < lamda:
                     step_entropy = compute_entropy(step_reward)
                     if k_method == "p1":
-                        k_d = k * (1 - step_entropy/compute_entropy(0.5))      # 这里衰减系数k可以用别的方法确定
+                        k_d = k * (1 - step_entropy/(2*compute_entropy(0.5)))      # 这里衰减系数k可以用别的方法确定
                     elif k_method == "p2":
                         k_d = k * math.epx(-a * step_entropy)
                     elif k_method == "p3":
@@ -438,12 +438,72 @@ class ProcessRewardModel:
                     else:
                         step_entropy = compute_entropy(step_rewards[i-1])
                         if k_method == "p1":
-                            k_d = k * (1 - step_entropy/compute_entropy(0.5))      # 这里衰减系数k可以用别的方法确定
+                            k_d = k * (1 - step_entropy/(2*compute_entropy(0.5)))      # 这里衰减系数k可以用别的方法确定
                         elif k_method == "p2":
                             k_d = k * math.epx(-a * step_entropy)
                         elif k_method == "p3":
                             k_d = k / (1 + math.exp(b * (step_entropy - compute_entropy(0.5))))      # 这里衰减系数k可以用别的方法确定
                         scores = scores * (1 - math.exp(-k_d * i/N))
+                        return scores
+            return scores * (1 - math.exp(-k))
+
+    def process_reward_test(self, outcome_reward, step_rewards, k_method):    # step_rewards是步骤奖励的列表
+        def compute_entropy(step_reward):
+            # 计算熵
+            epsilon = 1e-8  # 添加一个小的正数避免对 0 或负数取对数
+            step_reward = max(epsilon, min(1 - epsilon, step_reward))
+            entropy = -((step_reward) * math.log(step_reward) + (1 - step_reward) * math.log(1 - step_reward))
+            return entropy
+
+        lamda = 0.5     # 阈值
+        k = 2       # 衰减系数
+        scores = 1.0
+        N = len(step_rewards)    # 步骤的数量
+        a = 1     # k计算时用 p2 方法的系数
+        b = 1     # k计算时用 p3 方法的系数
+        x = 0
+
+        if outcome_reward == 1.0:
+            # 结果正确的情况
+            for i, step_reward in enumerate(step_rewards):
+                if step_reward < 0.2:  # 对于这样的步骤得分我们认为该步骤一定错误，后面的步骤无效，惩罚最高
+                    k_d = k
+                    scores = scores * math.exp(-k_d * (N - i - 1)/N)
+                    return scores
+                elif (step_reward >= 0.2) and (step_reward < 0.4):
+                    step_entropy = compute_entropy(step_reward)
+                    if k_method == "p1":
+                        k_d = k * (1 - step_entropy/(2*compute_entropy(0.5)))      # 这里衰减系数k可以用别的方法确定
+                    elif k_method == "p2":
+                        k_d = k * math.exp(-a * step_entropy)
+                    elif k_method == "p3":
+                        k_d = k / (1 + math.exp(b * (step_entropy - compute_entropy(0.5))))      # 这里衰减系数k可以用别的方法确定
+                    scores = scores * math.exp(-k_d * (N - i - 1)/N)
+                    return scores
+                elif (step_reward >= 0.4) and (step_reward < 0.6):
+                    step_entropy = compute_entropy(step_reward)
+                    scores -= (step_entropy/compute_entropy(0.5))/N 
+                    continue
+            return scores
+        else:
+            # 结果错误的情况
+            for i, step_reward in enumerate(step_rewards):
+                if step_reward < lamda: 
+                    if i == 0:
+                        return 0.0
+                    else:
+                        j=i
+                        for m, step_reward in enumerate(step_rewards): 
+                            if(m<=j):
+                                scores += step_reward*(0.9**m)   # 这里的0.9是一个衰减系数，可以调整
+                        #scores=scores/(j+1)/1.5
+                        scores=scores/ sum (0.9**m for m in range(j+1))/5
+                        for m, step_reward in enumerate(step_rewards): 
+                            if(m>j):
+                                x+=step_reward
+                        x=x/(N-j)
+                        if(x>0.5):
+                            scores+=0.1
                         return scores
             return scores * (1 - math.exp(-k))
 
