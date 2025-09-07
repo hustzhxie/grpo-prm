@@ -467,10 +467,12 @@ class ProcessRewardModel:
             # 结果正确的情况
             for i, step_reward in enumerate(step_rewards):
                 if step_reward < 0.2:  # 对于这样的步骤得分我们认为该步骤一定错误，后面的步骤无效，惩罚最高
+                    print(f"步骤{i+1}获得最高惩罚")
                     k_d = k
                     scores = scores * math.exp(-k_d * (N - i - 1)/N)
                     return scores
                 elif (step_reward >= 0.2) and (step_reward < 0.4):
+                    print(f"步骤{i+1}获得中等惩罚")
                     step_entropy = compute_entropy(step_reward)
                     if k_method == "p1":
                         k_d = k * (1 - step_entropy/(2*compute_entropy(0.5)))      # 这里衰减系数k可以用别的方法确定
@@ -481,6 +483,7 @@ class ProcessRewardModel:
                     scores = scores * math.exp(-k_d * (N - i - 1)/N)
                     return scores
                 elif (step_reward >= 0.4) and (step_reward < 0.6):
+                    print(f"步骤{i+1}获得不自信惩罚")
                     step_entropy = compute_entropy(step_reward)
                     scores -= (step_entropy/compute_entropy(0.5))/N 
                     continue
@@ -552,7 +555,7 @@ class ProcessRewardModel:
             # scores = step_tensor.sum()
             # scores_tensor = scores.unsqueeze(0)
             # scores_tensor = self.process_reward(step_rewards)
-            scores = self.process_reward(outcome_reward, step_rewards, k_method)
+            scores = self.process_reward_test(outcome_reward, step_rewards, k_method)
             scores_tensor = torch.tensor([scores])
             rewards_info.append({
                 "rewards": scores_tensor,
@@ -560,7 +563,8 @@ class ProcessRewardModel:
                 "extra_logs": {"dummy_scores": scores_tensor},
             })
         print("finish rewards")
-        print(rewards_info)
+        for reward_info in rewards_info:
+            print(reward_info["rewards"])
         return rewards_info
     def make_step_rewards(self, logits, token_masks):
         """根据新 PRM 机制（softmax + mask 提取 <extra_0> 位置的正类概率）计算每个 step 的分数"""

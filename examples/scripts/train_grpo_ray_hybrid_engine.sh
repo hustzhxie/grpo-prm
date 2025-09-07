@@ -21,11 +21,11 @@ python3 -m openrlhf.cli.train_ppo_ray \
    --use_kl_loss \
    --kl_estimator k3 \
    --advantage_estimator group_norm \
-   --pretrain Qwen/Qwen2.5-Math-1.5B \
+   --pretrain Qwen/Qwen2.5-Math-1.5B-Instruct \
    --reward_pretrain Qwen/Qwen2.5-Math-PRM-7B \
    --remote_rm_url "Qwen/Qwen2.5-Math-PRM-7B" \
-   --save_path /home/zhxie/OpenRLHF/checkpoint/GRPO/Qwen2.5-Math-1.5B-Instruct_lora \
-   --ckpt_path /home/zhxie/OpenRLHF/checkpoint/GRPO/Qwen2.5-Math-1.5B-Instruct_lora/ckpt \
+   --save_path /home/yanzhe/OpenRLHF/checkpoint/GRPO/Qwen2.5-Math-1.5B-Instruct_lora \
+   --ckpt_path /home/yanzhe/OpenRLHF/checkpoint/GRPO/Qwen2.5-Math-1.5B-Instruct_lora/ckpt \
    --save_hf_ckpt \
    --save_steps 15 \
    --micro_train_batch_size 2 \
@@ -41,7 +41,7 @@ python3 -m openrlhf.cli.train_ppo_ray \
    --bf16 \
    --actor_learning_rate 5e-7 \
    --critic_learning_rate 9e-6 \
-   --prompt_data /home/zhxie/OpenRLHF/datasets/math_level3to5_data_processed_with_qwen_prompt.json \
+   --prompt_data /home/yanzhe/OpenRLHF/datasets/math_level3to5_data_processed_with_qwen_prompt.json \
    --input_key question \
    --label_key answer \
    --apply_chat_template \
